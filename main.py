@@ -21,7 +21,9 @@ while True:
     
     accel, gyro = result
     accel = np.array([accel['x'], accel['y'], accel['z']])
-    gyro = np.array([gyro['x'], gyro['y'], gyro['z']])
+    gyro = np.array([gyro['x']/131.0*np.pi/180, gyro['y']/131.0*np.pi/180, gyro['z']/131.0*np.pi/180])  # Convert raw gyroscope values to radians per second
+
+
     q = madgwick.updateIMU(q,gyro,accel)
 
     print("Accelerometer data:", accel)
