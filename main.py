@@ -5,7 +5,7 @@ from ahrs.filters import Madgwick
 
 imu_sensor = sensor(address=0x68)  # change to 0x69 if needed
 dt = 1/60
-madgwick = Madgwick(sampletime=dt)
+madgwick = Madgwick(sampletime=dt,beta=0.02)
 q = np.array([1,0,0,0])
 while True:
 
