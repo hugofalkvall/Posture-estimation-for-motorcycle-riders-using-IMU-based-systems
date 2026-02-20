@@ -2,7 +2,7 @@ import time
 from sensor import sensor
 
 imu_sensor = sensor(address=0x68)  # change to 0x69 if needed
-
+dt = 1/60
 while True:
     result = imu_sensor.read_sensor_data()
 
@@ -16,4 +16,4 @@ while True:
     print("Gyroscope data:", gyro)
     print("-" * 30)
 
-    time.sleep(1/60)
+    time.sleep(dt)
