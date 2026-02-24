@@ -27,6 +27,8 @@ class sensor:
 
         except OSError as e:
             print("I2C read/write error:", e)
+            self.mpu = None
+            self.__init__(self.address)  # Attempt to reinitialize the sensor
             return None
         except Exception as e:
             print("Unexpected error while reading sensor:", e)
