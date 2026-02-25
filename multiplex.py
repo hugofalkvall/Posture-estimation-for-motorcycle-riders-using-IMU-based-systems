@@ -2,12 +2,15 @@ import time
 from smbus2 import SMBus
 from sensor import sensor
 
-
+# Multiplexer class to control the TCA9548A I2C multiplexer with sensor reading functionality
 class Multiplexer:
+
+    # Construct the multiplexer with the given I2C bus number and address
     def __init__(self, bus_num=1, address=0x70):
         self.bus = SMBus(bus_num)
         self.address = address
 
+    # Select a specific channel on the multiplexer by writing the appropriate byte to the control register
     def select_channel(self, channel: int):
         action = 1 << channel
         for _ in range(3):
@@ -20,32 +23,12 @@ class Multiplexer:
         return False
 
 
-
+# Function to read sensor data from a specific channel
 def read_mpu_on_channel(mux: Multiplexer, channel: int, mpu_addr: int = 0x68):
     mux.select_channel(channel)
-    time.sleep(0.01)  # liten delay så buss/stabilisering hinner ske
+    time.sleep(0.01) # Short delay to stabilize channel selection
 
-    imu = sensor(address=mpu_addr)  # init efter kanalval är enklast/säkraste
+    # Read sensor data using the sensor class
+    imu = sensor(address=mpu_addr)
     result = imu.read_sensor_data()
     return result
-
-
-if __name__ == "__main__":
-    BUS = 1
-    MUX_ADDR = 0x70
-    MPU_ADDR = 0x68  # ändra till 0x69 om AD0 är HIGH på din MPU
-
-    mux = Multiplexer(bus_num=BUS, address=MUX_ADDR)
-
-    while True:
-        for ch in [0, 2]:
-            result = read_mpu_on_channel(mux, ch, MPU_ADDR)
-
-            if result is None:
-                print(f"CH{ch}: read failed")
-            else:
-                accel, gyro = result
-                print(f"CH{ch}: accel={accel} gyro={gyro}")
-
-        print("-" * 40)
-        time.sleep(0.1)

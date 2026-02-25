@@ -1,8 +1,9 @@
 from mpu6050 import mpu6050
 
+# Sensor class to interface with the MPU6050 IMU sensor
 class sensor:
 
-    # Initialize the sensor with the given I2C address
+    # Construct the sensor with the given I2C address
     def __init__(self, address=0x68):
         self.address = address
         self.mpu = None

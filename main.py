@@ -1,54 +1,80 @@
 import time
 from collections import deque
-from sensor import sensor
 import numpy as np
 from ahrs.filters import Madgwick
 from ahrs.common.orientation import q2euler
 
-imu_sensor = sensor(address=0x68)  # change to 0x69 if needed
-dt = 1/60
-madgwick = Madgwick(sampletime=dt, beta=0.02)
-q = np.array([1.0, 0.0, 0.0, 0.0])
+from multiplex import Multiplexer, read_mpu_on_channel
 
-t = 0.0
-out_path = "euler_angles.txt"
+# Configuration variables 
+BUS = 1
+MUX_ADDR = 0x70
+MPU_ADDR = 0x68
+MUX_CHANNELS = [0, 2, 7]
 
-# Keep only the last 10 samples in memory
-last50 = deque(maxlen=10)
+DT = 1 / 60 # 60 Hz update rate
+BETA = 2.5  # Madgwick filter gain
 
+OUT_PATH = "euler_angles.txt"
+KEEP_LAST = 10  # per channel
+
+# Initilaziation of multiplexer 
+mux = Multiplexer(bus_num=BUS, address=MUX_ADDR)
+
+# Create a filter, quaternion, and history for each channel
+filters = {ch: Madgwick(sampletime=DT, beta=BETA) for ch in MUX_CHANNELS}
+quats = {ch: np.array([1.0, 0.0, 0.0, 0.0]) for ch in MUX_CHANNELS}
+history = {ch: deque(maxlen=KEEP_LAST) for ch in MUX_CHANNELS}
+
+# Runtime reference time
+t0 = time.monotonic()
+
+# Main loop
 try:
     while True:
-        result = imu_sensor.read_sensor_data()
-        if result is None:
-            time.sleep(2)
-            print("Retrying sensor read after error...")
-            continue
 
-        accel, gyro = result
-        accel = np.array([accel["x"], accel["y"], accel["z"]], dtype=float)
-        gyro = np.array([
-            gyro["x"] / 131.0 * np.pi / 180.0,
-            gyro["y"] / 131.0 * np.pi / 180.0,
-            gyro["z"] / 131.0 * np.pi / 180.0
-        ], dtype=float)
+        # Read from each channel on mux, update the filter, and store the results
+        for ch in MUX_CHANNELS:
+            result = read_mpu_on_channel(mux, ch, MPU_ADDR)
+            if result is None:
+                continue
 
-        q = madgwick.updateIMU(q, gyro, accel)
-        roll, pitch, yaw = q2euler(q)
+            # Unpack acceleration and gyro data in a result tuple 
+            accel, gyro = result
 
-        roll_deg = float(roll * 180.0 / np.pi)
-        pitch_deg = float(pitch * 180.0 / np.pi)
-        yaw_deg = float(yaw * 180.0 / np.pi)
+            # Structure the data into arrays, converting gyro to radians/sec
+            accel = np.array([accel["x"], accel["y"], accel["z"]], dtype=float)
+            gyro = np.array([
+                gyro["x"] / 131.0 * np.pi / 180.0,
+                gyro["y"] / 131.0 * np.pi / 180.0,
+                gyro["z"] / 131.0 * np.pi / 180.0,
+            ], dtype=float)
 
-        last50.append((t, roll_deg, pitch_deg, yaw_deg))
+            # Update the filter and convert to Euler angles
+            quats[ch] = filters[ch].updateIMU(quats[ch], gyro, accel)
+            roll, pitch, yaw = q2euler(quats[ch])
 
-        # Overwrite the file each iteration with only the last 10 lines
-        with open(out_path, "w") as f:
-            for tt, r, p, y in last50:
-                pi_epoch = time.time()
-                f.write(f"{pi_epoch:.6f},{roll_deg:.6f},{pitch_deg:.6f},{yaw_deg:.6f}\n")
+            # Convert radians to degrees
+            roll_deg = float(roll * 180.0 / np.pi)
+            pitch_deg = float(pitch * 180.0 / np.pi)
+            yaw_deg = float(yaw * 180.0 / np.pi)
 
-        t += dt
-        time.sleep(dt)
+            # Calculate time 
+            t_rel = time.monotonic() - t0      # starts at 0
+            epoch = time.time()                # for latency if clocks are synced
+
+            # Store values and time 
+            history[ch].append((t_rel, epoch, roll_deg, pitch_deg, yaw_deg))        
+
+        # Write to file: ch,t_rel,epoch,roll,pitch,yaw
+        with open(OUT_PATH, "w") as f:
+            for ch in MUX_CHANNELS:
+                for t_rel, epoch, r, p, y in history[ch]:
+                    f.write(f"{ch},{t_rel:.6f},{epoch:.6f},{r:.6f},{p:.6f},{y:.6f}\n")
+
+        # Frequency control
+        time.sleep(DT)
 
 except KeyboardInterrupt:
+    print("Exiting...")
     pass
