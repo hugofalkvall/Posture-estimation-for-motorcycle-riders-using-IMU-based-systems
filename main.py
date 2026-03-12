@@ -12,11 +12,17 @@ MUX_ADDR = 0x70
 MPU_ADDR = 0x68
 MUX_CHANNELS = [0, 2, 7]
 
-DT = 1 / 60 # 60 Hz update rate
-BETA = 2.5  # Madgwick filter gain
+DT = 1 / 50  # 50 Hz loop delay target (real per-channel dt is measured below)
+BETA = 0.1  # Madgwick filter gain (lower is usually better for IMU-only yaw)
+RAD2DEG = 180.0 / np.pi
+CALIB_SAMPLES = 100
+MAX_PROCESS_LATENCY_MS = 100.0
 
 OUT_PATH = "euler_angles.txt"
-KEEP_LAST = 10  # per channel
+KEEP_LAST = 50  # per channel
+LATENCY_WINDOW = 300  # moving average window over latest samples
+LATENCY_PRINT_EVERY = 5.0  # seconds
+STREAM_REFRESH_EVERY = 0.1  # seconds
 
 # Initilaziation of multiplexer 
 mux = Multiplexer(bus_num=BUS, address=MUX_ADDR)
@@ -25,55 +31,152 @@ mux = Multiplexer(bus_num=BUS, address=MUX_ADDR)
 filters = {ch: Madgwick(sampletime=DT, beta=BETA) for ch in MUX_CHANNELS}
 quats = {ch: np.array([1.0, 0.0, 0.0, 0.0]) for ch in MUX_CHANNELS}
 history = {ch: deque(maxlen=KEEP_LAST) for ch in MUX_CHANNELS}
+gyro_bias = {ch: np.zeros(3, dtype=float) for ch in MUX_CHANNELS}
+last_update = {ch: None for ch in MUX_CHANNELS}
+start_due = time.monotonic()
+phase_step = DT / max(1, len(MUX_CHANNELS))
+next_due = {ch: start_due + (i * phase_step) for i, ch in enumerate(MUX_CHANNELS)}
+sample_times = {ch: deque(maxlen=200) for ch in MUX_CHANNELS}
+latency_window = deque(maxlen=LATENCY_WINDOW)
+latency_total_ms = 0.0
+latency_total_count = 0
+latency_min_ms = float("inf")
+latency_max_ms = 0.0
 
 # Runtime reference time
 t0 = time.monotonic()
+last_print = 0.0
+last_stream_refresh = 0.0
+
+# Calibrate gyro bias per channel while sensors are stationary.
+for ch in MUX_CHANNELS:
+    acc_bias = np.zeros(3, dtype=float)
+    count = 0
+    for _ in range(CALIB_SAMPLES):
+        result = read_mpu_on_channel(mux, ch, MPU_ADDR)
+        if result is None:
+            time.sleep(DT)
+            continue
+        _, gyro = result
+        acc_bias += np.deg2rad(np.array([gyro["x"], gyro["y"], gyro["z"]], dtype=float))
+        count += 1
+        time.sleep(DT)
+    if count > 0:
+        gyro_bias[ch] = acc_bias / count
 
 # Main loop
 try:
-    while True:
+    with open(OUT_PATH, "w", buffering=1) as f:
+        while True:
+            now = time.monotonic()
+            due_channels = [ch for ch in MUX_CHANNELS if now >= next_due[ch]]
 
-        # Read from each channel on mux, update the filter, and store the results
-        for ch in MUX_CHANNELS:
-            result = read_mpu_on_channel(mux, ch, MPU_ADDR)
-            if result is None:
+            if not due_channels:
+                sleep_for = min(next_due.values()) - now
+                time.sleep(max(0.0005, min(sleep_for, DT / 2)))
                 continue
 
-            # Unpack acceleration and gyro data in a result tuple 
-            accel, gyro = result
+            # Process only channels that are due; this enforces 50 Hz target per channel.
+            for ch in due_channels:
+                sample_start = time.perf_counter()
+                result = read_mpu_on_channel(mux, ch, MPU_ADDR)
+                process_end = time.monotonic()
 
-            # Structure the data into arrays, converting gyro to radians/sec
-            accel = np.array([accel["x"], accel["y"], accel["z"]], dtype=float)
-            gyro = np.array([
-                gyro["x"] / 131.0 * np.pi / 180.0,
-                gyro["y"] / 131.0 * np.pi / 180.0,
-                gyro["z"] / 131.0 * np.pi / 180.0,
-            ], dtype=float)
+                # Keep the schedule aligned to real time and avoid drift/catch-up bursts.
+                next_due[ch] += DT
+                if process_end > next_due[ch]:
+                    missed = int((process_end - next_due[ch]) / DT) + 1
+                    next_due[ch] += missed * DT
 
-            # Update the filter and convert to Euler angles
-            quats[ch] = filters[ch].updateIMU(quats[ch], gyro, accel)
-            roll, pitch, yaw = q2euler(quats[ch])
+                if result is None:
+                    continue
 
-            # Convert radians to degrees
-            roll_deg = float(roll * 180.0 / np.pi)
-            pitch_deg = float(pitch * 180.0 / np.pi)
-            yaw_deg = float(yaw * 180.0 / np.pi)
+                # Unpack acceleration and gyro data in a result tuple
+                accel, gyro = result
 
-            # Calculate time 
-            t_rel = time.monotonic() - t0      # starts at 0
-            epoch = time.time()                # for latency if clocks are synced
+                # Structure the data into arrays, converting gyro deg/s -> rad/s
+                accel = np.array([accel["x"], accel["y"], accel["z"]], dtype=float)
+                gyro = np.array([
+                    gyro["x"],
+                    gyro["y"],
+                    gyro["z"],
+                ], dtype=float)
+                gyro = np.deg2rad(gyro) - gyro_bias[ch]
 
-            # Store values and time 
-            history[ch].append((t_rel, epoch, roll_deg, pitch_deg, yaw_deg))        
+                # Use measured per-channel dt.
+                now_ch = process_end
+                dt_ch = DT if last_update[ch] is None else max(1e-4, now_ch - last_update[ch])
+                last_update[ch] = now_ch
+                if hasattr(filters[ch], "Dt"):
+                    filters[ch].Dt = dt_ch
 
-        # Write to file: ch,t_rel,epoch,roll,pitch,yaw
-        with open(OUT_PATH, "w") as f:
-            for ch in MUX_CHANNELS:
-                for t_rel, epoch, r, p, y in history[ch]:
-                    f.write(f"{ch},{t_rel:.6f},{epoch:.6f},{r:.6f},{p:.6f},{y:.6f}\n")
+                # Update the filter and convert to Euler angles
+                quats[ch] = filters[ch].updateIMU(quats[ch], gyro, accel)
+                roll, pitch, yaw = q2euler(quats[ch])
 
-        # Frequency control
-        time.sleep(DT)
+                # Convert radians to degrees
+                roll_deg = float(roll * RAD2DEG)
+                pitch_deg = float(pitch * RAD2DEG)
+                yaw_deg = float(yaw * RAD2DEG)
+
+                # Calculate time
+                t_rel = time.monotonic() - t0      # starts at 0
+                epoch = time.time()                # for latency if clocks are synced
+
+                # Store values and time
+                history[ch].append((t_rel, epoch, roll_deg, pitch_deg, yaw_deg))
+                sample_times[ch].append(now_ch)
+
+                # End-to-end latency per channel sample in ms (read -> filter -> store).
+                sample_latency_ms = (time.perf_counter() - sample_start) * 1000.0
+                latency_window.append(sample_latency_ms)
+                latency_total_ms += sample_latency_ms
+                latency_total_count += 1
+                latency_min_ms = min(latency_min_ms, sample_latency_ms)
+                latency_max_ms = max(latency_max_ms, sample_latency_ms)
+
+                if sample_latency_ms > MAX_PROCESS_LATENCY_MS:
+                    print(
+                        f"WARNING: channel {ch} sample latency {sample_latency_ms:.2f} ms "
+                        f"exceeds {MAX_PROCESS_LATENCY_MS:.0f} ms"
+                    )
+
+            now = time.monotonic()
+            if (now - last_print) >= LATENCY_PRINT_EVERY and latency_total_count > 0:
+                avg_window_ms = sum(latency_window) / len(latency_window)
+                avg_total_ms = latency_total_ms / latency_total_count
+                win_min_ms = min(latency_window)
+                win_max_ms = max(latency_window)
+                spike_high_ms = win_max_ms - avg_window_ms
+                spike_low_ms = avg_window_ms - win_min_ms
+                rate_parts = []
+                for ch in MUX_CHANNELS:
+                    if len(sample_times[ch]) >= 2:
+                        elapsed = sample_times[ch][-1] - sample_times[ch][0]
+                        hz = (len(sample_times[ch]) - 1) / elapsed if elapsed > 0 else 0.0
+                        rate_parts.append(f"ch{ch}:{hz:.1f}Hz")
+                    else:
+                        rate_parts.append(f"ch{ch}:n/a")
+                print(
+                    f"beta: {BETA:.3f} | "
+                    f"Latency avg total: {avg_total_ms:.2f} ms | "
+                    f"rolling avg({len(latency_window)}): {avg_window_ms:.2f} ms | "
+                    f"window spike high/low: +{spike_high_ms:.2f}/-{spike_low_ms:.2f} ms "
+                    f"(win max/min: {win_max_ms:.2f}/{win_min_ms:.2f}) | "
+                    f"global max/min: {latency_max_ms:.2f}/{latency_min_ms:.2f} ms | "
+                    f"samples: {latency_total_count} | rates: {' '.join(rate_parts)}"
+                )
+                last_print = now
+
+            # Keep streamed plot input bounded in size to avoid growing redraw cost.
+            if (now - last_stream_refresh) >= STREAM_REFRESH_EVERY:
+                f.seek(0)
+                for ch in MUX_CHANNELS:
+                    for t_rel, epoch, r, p, y in history[ch]:
+                        f.write(f"{ch},{t_rel:.6f},{epoch:.6f},{r:.6f},{p:.6f},{y:.6f}\n")
+                f.truncate()
+                f.flush()
+                last_stream_refresh = now
 
 except KeyboardInterrupt:
     print("Exiting...")

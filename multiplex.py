@@ -9,6 +9,7 @@ class Multiplexer:
     def __init__(self, bus_num=1, address=0x70):
         self.bus = SMBus(bus_num)
         self.address = address
+        self._sensors = {}
 
     # Select a specific channel on the multiplexer by writing the appropriate byte to the control register
     def select_channel(self, channel: int):
@@ -16,19 +17,23 @@ class Multiplexer:
         for _ in range(3):
             try:
                 self.bus.write_byte(self.address, action)
-                time.sleep(0.01)
+                # Channel switch is effectively immediate; avoid large fixed delay.
+                time.sleep(0.001)
                 return True
             except OSError as e:
-                time.sleep(0.05)
+                time.sleep(0.005)
         return False
 
 
 # Function to read sensor data from a specific channel
 def read_mpu_on_channel(mux: Multiplexer, channel: int, mpu_addr: int = 0x68):
-    mux.select_channel(channel)
-    time.sleep(0.01) # Short delay to stabilize channel selection
+    if not mux.select_channel(channel):
+        return None
 
-    # Read sensor data using the sensor class
-    imu = sensor(address=mpu_addr)
+    # Reuse one sensor instance per channel to avoid expensive re-initialization.
+    if channel not in mux._sensors:
+        mux._sensors[channel] = sensor(address=mpu_addr, bus=mux.bus)
+
+    imu = mux._sensors[channel]
     result = imu.read_sensor_data()
     return result
