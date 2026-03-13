@@ -3,19 +3,57 @@ from collections import deque
 import numpy as np
 from ahrs.filters import Madgwick
 from ahrs.common.orientation import q2euler
+from scipy.spatial.transform import Rotation
 
 from multiplex import Multiplexer, read_mpu_on_channel
+def euler2rotation_matrix(roll, pitch, yaw):
+    # Convert degrees to radians
+    roll_rad = np.deg2rad(roll)
+    pitch_rad = np.deg2rad(pitch)
+    yaw_rad = np.deg2rad(yaw)
+
+    # Compute individual rotation matrices
+    R_x = np.array([[1, 0, 0],
+                    [0, np.cos(roll_rad), -np.sin(roll_rad)],
+                    [0, np.sin(roll_rad), np.cos(roll_rad)]])
+
+    R_y = np.array([[np.cos(pitch_rad), 0, np.sin(pitch_rad)],
+                    [0, 1, 0],
+                    [-np.sin(pitch_rad), 0, np.cos(pitch_rad)]])
+
+    R_z = np.array([[np.cos(yaw_rad), -np.sin(yaw_rad), 0],
+                    [np.sin(yaw_rad), np.cos(yaw_rad), 0],
+                    [0, 0, 1]])
+
+    # Combined rotation matrix
+    R = R_z @ R_y @ R_x
+    return R
+
+def frame_transformation(frame1, frame2):
+
+    # Inverse
+    inverse_frame = np.linalg.inv(frame2)
+
+    # Transform
+    transformed_frame = inverse_frame @ frame1
+    return transformed_frame
+
+def rotation_matrix2euler(matrix):
+    # Extract 3x3 rotation matrix to euler angles
+    rot = Rotation.from_matrix(matrix)
+    return rot.as_euler('zyx', degrees=True)
+
 
 # Configuration variables 
 BUS = 1
 MUX_ADDR = 0x70
 MPU_ADDR = 0x68
-MUX_CHANNELS = [0, 2, 7]
+MUX_CHANNELS = [0, 2, 3]
 
 DT = 1 / 50  # 50 Hz loop delay target (real per-channel dt is measured below)
-BETA = 0.1  # Madgwick filter gain (lower is usually better for IMU-only yaw)
+BETA = 0.2  # Madgwick filter gain (lower is usually better for IMU-only yaw)
 RAD2DEG = 180.0 / np.pi
-CALIB_SAMPLES = 100
+CALIB_SAMPLES = 0
 MAX_PROCESS_LATENCY_MS = 100.0
 
 OUT_PATH = "euler_angles.txt"
@@ -67,6 +105,10 @@ for ch in MUX_CHANNELS:
 # Main loop
 try:
     with open(OUT_PATH, "w", buffering=1) as f:
+        frame_matrix=None
+
+        counter=0
+
         while True:
             now = time.monotonic()
             due_channels = [ch for ch in MUX_CHANNELS if now >= next_due[ch]]
@@ -119,6 +161,16 @@ try:
                 pitch_deg = float(pitch * RAD2DEG)
                 yaw_deg = float(yaw * RAD2DEG)
 
+                if(ch==0):
+                    frame_matrix=euler2rotation_matrix(roll_deg,pitch_deg,yaw_deg)
+                else:
+                    R = euler2rotation_matrix(roll_deg, pitch_deg, yaw_deg)
+                    R_trans = frame_transformation(R,frame_matrix)
+                    angles = rotation_matrix2euler(R_trans)
+                    roll_deg=angles[0]
+                    pitch_deg=angles[1]
+                    yaw_deg=angles[2]
+
                 # Calculate time
                 t_rel = time.monotonic() - t0      # starts at 0
                 epoch = time.time()                # for latency if clocks are synced
@@ -134,12 +186,6 @@ try:
                 latency_total_count += 1
                 latency_min_ms = min(latency_min_ms, sample_latency_ms)
                 latency_max_ms = max(latency_max_ms, sample_latency_ms)
-
-                if sample_latency_ms > MAX_PROCESS_LATENCY_MS:
-                    print(
-                        f"WARNING: channel {ch} sample latency {sample_latency_ms:.2f} ms "
-                        f"exceeds {MAX_PROCESS_LATENCY_MS:.0f} ms"
-                    )
 
             now = time.monotonic()
             if (now - last_print) >= LATENCY_PRINT_EVERY and latency_total_count > 0:
@@ -157,15 +203,7 @@ try:
                         rate_parts.append(f"ch{ch}:{hz:.1f}Hz")
                     else:
                         rate_parts.append(f"ch{ch}:n/a")
-                print(
-                    f"beta: {BETA:.3f} | "
-                    f"Latency avg total: {avg_total_ms:.2f} ms | "
-                    f"rolling avg({len(latency_window)}): {avg_window_ms:.2f} ms | "
-                    f"window spike high/low: +{spike_high_ms:.2f}/-{spike_low_ms:.2f} ms "
-                    f"(win max/min: {win_max_ms:.2f}/{win_min_ms:.2f}) | "
-                    f"global max/min: {latency_max_ms:.2f}/{latency_min_ms:.2f} ms | "
-                    f"samples: {latency_total_count} | rates: {' '.join(rate_parts)}"
-                )
+
                 last_print = now
 
             # Keep streamed plot input bounded in size to avoid growing redraw cost.
@@ -181,3 +219,4 @@ try:
 except KeyboardInterrupt:
     print("Exiting...")
     pass
+
