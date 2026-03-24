@@ -3,45 +3,43 @@ from collections import deque
 import numpy as np
 from ahrs.filters import Madgwick
 from ahrs.common.orientation import q2euler
-from scipy.spatial.transform import Rotation
 
 from multiplex import Multiplexer, read_mpu_on_channel
-def euler2rotation_matrix(roll, pitch, yaw):
-    # Convert degrees to radians
-    roll_rad = np.deg2rad(roll)
-    pitch_rad = np.deg2rad(pitch)
-    yaw_rad = np.deg2rad(yaw)
 
-    # Compute individual rotation matrices
-    R_x = np.array([[1, 0, 0],
-                    [0, np.cos(roll_rad), -np.sin(roll_rad)],
-                    [0, np.sin(roll_rad), np.cos(roll_rad)]])
+def quaternion_to_rotation_matrix(q):
+    """Convert quaternion [w, x, y, z] into a 3x3 rotation matrix."""
+    q = np.asarray(q, dtype=float)
+    norm = np.linalg.norm(q)
+    if norm == 0.0:
+        return np.eye(3)
+    w, x, y, z = q / norm
+    return np.array([
+        [1.0 - 2.0 * (y * y + z * z), 2.0 * (x * y - w * z), 2.0 * (x * z + w * y)],
+        [2.0 * (x * y + w * z), 1.0 - 2.0 * (x * x + z * z), 2.0 * (y * z - w * x)],
+        [2.0 * (x * z - w * y), 2.0 * (y * z + w * x), 1.0 - 2.0 * (x * x + y * y)],
+    ])
 
-    R_y = np.array([[np.cos(pitch_rad), 0, np.sin(pitch_rad)],
-                    [0, 1, 0],
-                    [-np.sin(pitch_rad), 0, np.cos(pitch_rad)]])
 
-    R_z = np.array([[np.cos(yaw_rad), -np.sin(yaw_rad), 0],
-                    [np.sin(yaw_rad), np.cos(yaw_rad), 0],
-                    [0, 0, 1]])
+def frame_transformation(target_frame, reference_frame):
+    """Express target_frame in the reference_frame coordinate system."""
+    return reference_frame.T @ target_frame
 
-    # Combined rotation matrix
-    R = R_z @ R_y @ R_x
-    return R
 
-def frame_transformation(frame1, frame2):
+def rotation_matrix_to_euler_zyx(matrix):
+    """Return roll, pitch, yaw in degrees for R = Rz(yaw) @ Ry(pitch) @ Rx(roll)."""
+    matrix = np.asarray(matrix, dtype=float)
+    pitch = np.arcsin(-np.clip(matrix[2, 0], -1.0, 1.0))
+    cos_pitch = np.cos(pitch)
 
-    # Inverse
-    inverse_frame = np.linalg.inv(frame2)
+    if abs(cos_pitch) > 1e-6:
+        roll = np.arctan2(matrix[2, 1], matrix[2, 2])
+        yaw = np.arctan2(matrix[1, 0], matrix[0, 0])
+    else:
+        # Gimbal-lock fallback: keep yaw defined and collapse roll to zero.
+        roll = 0.0
+        yaw = np.arctan2(-matrix[0, 1], matrix[1, 1])
 
-    # Transform
-    transformed_frame = inverse_frame @ frame1
-    return transformed_frame
-
-def rotation_matrix2euler(matrix):
-    # Extract 3x3 rotation matrix to euler angles
-    rot = Rotation.from_matrix(matrix)
-    return rot.as_euler('zyx', degrees=True)
+    return np.rad2deg([roll, pitch, yaw])
 
 
 # Configuration variables 
@@ -50,14 +48,14 @@ MUX_ADDR = 0x70
 MPU_ADDR = 0x68
 MUX_CHANNELS = [0, 2, 3]
 
-DT = 1 / 50  # 50 Hz loop delay target (real per-channel dt is measured below)
+DT = 1 / 50  
 BETA = 0.2  # Madgwick filter gain (lower is usually better for IMU-only yaw)
 RAD2DEG = 180.0 / np.pi
 CALIB_SAMPLES = 0
 MAX_PROCESS_LATENCY_MS = 100.0
 
 OUT_PATH = "euler_angles.txt"
-KEEP_LAST = 50  # per channel
+KEEP_LAST = 1  # per channel
 LATENCY_WINDOW = 300  # moving average window over latest samples
 LATENCY_PRINT_EVERY = 5.0  # seconds
 STREAM_REFRESH_EVERY = 0.1  # seconds
@@ -105,7 +103,7 @@ for ch in MUX_CHANNELS:
 # Main loop
 try:
     with open(OUT_PATH, "w", buffering=1) as f:
-        frame_matrix=None
+        reference_matrix = None
 
         counter=0
 
@@ -154,6 +152,7 @@ try:
 
                 # Update the filter and convert to Euler angles
                 quats[ch] = filters[ch].updateIMU(quats[ch], gyro, accel)
+                sensor_matrix = quaternion_to_rotation_matrix(quats[ch])
                 roll, pitch, yaw = q2euler(quats[ch])
 
                 # Convert radians to degrees
@@ -162,14 +161,12 @@ try:
                 yaw_deg = float(yaw * RAD2DEG)
 
                 if(ch==0):
-                    frame_matrix=euler2rotation_matrix(roll_deg,pitch_deg,yaw_deg)
+                    reference_matrix = sensor_matrix
                 else:
-                    R = euler2rotation_matrix(roll_deg, pitch_deg, yaw_deg)
-                    R_trans = frame_transformation(R,frame_matrix)
-                    angles = rotation_matrix2euler(R_trans)
-                    roll_deg=angles[0]
-                    pitch_deg=angles[1]
-                    yaw_deg=angles[2]
+                    if reference_matrix is None:
+                        continue
+                    relative_matrix = frame_transformation(sensor_matrix, reference_matrix)
+                    roll_deg, pitch_deg, yaw_deg = rotation_matrix_to_euler_zyx(relative_matrix)
 
                 # Calculate time
                 t_rel = time.monotonic() - t0      # starts at 0
@@ -219,4 +216,3 @@ try:
 except KeyboardInterrupt:
     print("Exiting...")
     pass
-
