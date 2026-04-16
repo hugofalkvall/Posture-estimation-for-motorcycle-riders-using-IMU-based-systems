@@ -19,6 +19,24 @@ def quaternion_to_rotation_matrix(q):
         [2.0 * (x * z - w * y), 2.0 * (y * z + w * x), 1.0 - 2.0 * (x * x + y * y)],
     ])
 
+def euler_to_rotation_matrix(roll, pitch, yaw):
+    """Convert roll, pitch, yaw in degrees to a 3x3 rotation matrix."""
+    r = np.deg2rad(roll)
+    p = np.deg2rad(pitch)
+    y = np.deg2rad(yaw)
+
+    cr = np.cos(r)
+    sr = np.sin(r)
+    cp = np.cos(p)
+    sp = np.sin(p)
+    cy = np.cos(y)
+    sy = np.sin(y)
+
+    return np.array([
+        [cy * cp, cy * sp * sr - sy * cr, cy * sp * cr + sy * sr],
+        [sy * cp, sy * sp * sr + cy * cr, sy * sp * cr - cy * sr],
+        [-sp, cp * sr, cp * cr],
+    ])
 
 def frame_transformation(target_frame, reference_frame):
     """Express target_frame in the reference_frame coordinate system."""
@@ -40,24 +58,25 @@ def rotation_matrix_to_euler_zyx(matrix):
         yaw = np.arctan2(-matrix[0, 1], matrix[1, 1])
 
     return np.rad2deg([roll, pitch, yaw])
-
-
 # Configuration variables 
 BUS = 1
 MUX_ADDR = 0x70
 MPU_ADDR = 0x68
-MUX_CHANNELS = [0, 2, 3]
+MUX_CHANNELS = [0, 3, 2]
 
 DT = 1 / 50  
 BETA = 0.2  # Madgwick filter gain (lower is usually better for IMU-only yaw)
 RAD2DEG = 180.0 / np.pi
-CALIB_SAMPLES = 0
+CALIB_SAMPLES = 10
 MAX_PROCESS_LATENCY_MS = 100.0
+LATENCY_WINDOW = 200  # number of recent samples to track for latency stats
+LATENCY_PRINT_EVERY = 5.0  # seconds
+yaw_deg_calib_ch0 = 0
+yaw_deg_calib_ch2 = 0 
+yaw_deg_calib_ch3 = 0
 
 OUT_PATH = "euler_angles.txt"
 KEEP_LAST = 1  # per channel
-LATENCY_WINDOW = 300  # moving average window over latest samples
-LATENCY_PRINT_EVERY = 5.0  # seconds
 STREAM_REFRESH_EVERY = 0.1  # seconds
 
 # Initilaziation of multiplexer 
@@ -103,11 +122,15 @@ for ch in MUX_CHANNELS:
 # Main loop
 try:
     with open(OUT_PATH, "w", buffering=1) as f:
-        reference_matrix = None
+        reference_matrix_bike = None
+        reference_matrix_ch2 = None 
 
         counter=0
+        inactive_counter=0
+        reset_counter=0
 
         while True:
+            
             now = time.monotonic()
             due_channels = [ch for ch in MUX_CHANNELS if now >= next_due[ch]]
 
@@ -133,7 +156,7 @@ try:
 
                 # Unpack acceleration and gyro data in a result tuple
                 accel, gyro = result
-
+                
                 # Structure the data into arrays, converting gyro deg/s -> rad/s
                 accel = np.array([accel["x"], accel["y"], accel["z"]], dtype=float)
                 gyro = np.array([
@@ -141,7 +164,7 @@ try:
                     gyro["y"],
                     gyro["z"],
                 ], dtype=float)
-                gyro = np.deg2rad(gyro) - gyro_bias[ch]
+                gyro = np.deg2rad(gyro) - gyro_bias[ch]             
 
                 # Use measured per-channel dt.
                 now_ch = process_end
@@ -152,20 +175,57 @@ try:
 
                 # Update the filter and convert to Euler angles
                 quats[ch] = filters[ch].updateIMU(quats[ch], gyro, accel)
-                sensor_matrix = quaternion_to_rotation_matrix(quats[ch])
                 roll, pitch, yaw = q2euler(quats[ch])
 
                 # Convert radians to degrees
                 roll_deg = float(roll * RAD2DEG)
                 pitch_deg = float(pitch * RAD2DEG)
                 yaw_deg = float(yaw * RAD2DEG)
+                threshold = np.deg2rad(10)
+                
+                if abs(gyro[2]) < threshold:
+                    inactive_counter = inactive_counter +1
+                else:
+                    inactive_counter = 0
+
+                if(inactive_counter >= 1000):
+                    
+                    if(ch==0):
+                        yaw_deg_calib_ch0 = yaw_deg
+                        reset_counter = reset_counter +1
+                    if(ch==2):
+                        yaw_deg_calib_ch2 = yaw_deg
+                        reset_counter = reset_counter +1
+                    if(ch==3):
+                        yaw_deg_calib_ch3 = yaw_deg
+                        reset_counter = reset_counter +1
+
+                if(reset_counter == 3):
+                    inactive_counter = 0
+                    reset_counter = 0
 
                 if(ch==0):
-                    reference_matrix = sensor_matrix
-                else:
-                    if reference_matrix is None:
+                    yaw_deg -= yaw_deg_calib_ch0
+                if(ch==2):
+                    yaw_deg -= yaw_deg_calib_ch2
+                if(ch==3):
+                    yaw_deg -= yaw_deg_calib_ch3 
+
+                sensor_matrix = euler_to_rotation_matrix(roll_deg, pitch_deg, yaw_deg)
+
+                if(ch==0):
+                    reference_matrix_bike = sensor_matrix
+                elif(ch==2):
+                    if reference_matrix_bike is None:
                         continue
-                    relative_matrix = frame_transformation(sensor_matrix, reference_matrix)
+                    relative_matrix = frame_transformation(sensor_matrix, reference_matrix_bike)
+                    roll_deg, pitch_deg, yaw_deg = rotation_matrix_to_euler_zyx(relative_matrix)
+                    reference_matrix_ch2 = relative_matrix
+                else: 
+                    if reference_matrix_bike is None or reference_matrix_ch2 is None:
+                        continue
+                   
+                    relative_matrix = frame_transformation(reference_matrix_ch2, sensor_matrix,)
                     roll_deg, pitch_deg, yaw_deg = rotation_matrix_to_euler_zyx(relative_matrix)
 
                 # Calculate time
