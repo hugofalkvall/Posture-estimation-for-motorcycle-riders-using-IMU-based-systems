@@ -225,7 +225,7 @@ try:
                     if reference_matrix_bike is None or reference_matrix_ch2 is None:
                         continue
                    
-                    relative_matrix = frame_transformation(reference_matrix_ch2, sensor_matrix,)
+                    relative_matrix = frame_transformation(sensor_matrix,reference_matrix_ch2)
                     roll_deg, pitch_deg, yaw_deg = rotation_matrix_to_euler_zyx(relative_matrix)
 
                 # Calculate time
