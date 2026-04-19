@@ -32,7 +32,7 @@ def read_mpu_on_channel(mux: Multiplexer, channel: int, mpu_addr: int = 0x68):
 
     # Reuse one sensor instance per channel to avoid expensive re-initialization.
     if channel not in mux._sensors:
-        mux._sensors[channel] = sensor(address=mpu_addr, bus=mux.bus)
+        mux._sensors[channel] = sensor(address=mpu_addr, bus=mux.bus, channel=channel)
 
     imu = mux._sensors[channel]
     result = imu.read_sensor_data()

@@ -17,12 +17,18 @@ def _to_int16(msb, lsb):
 # Sensor class to interface with the MPU6050 IMU sensor
 class sensor:
     # Construct the sensor with the given I2C address
-    def __init__(self, address=0x68, bus=None, bus_num=1):
+    def __init__(self, address=0x68, bus=None, bus_num=1, channel=None):
         self.address = address
         self.bus = bus if bus is not None else SMBus(bus_num)
         self._owns_bus = bus is None
         self._initialized = False
+        self.channel = channel
         self._init_sensor()
+
+    def _sensor_label(self):
+        if self.channel is None:
+            return ""
+        return f" ({self.channel} Ch sensor)"
 
     def _init_sensor(self):
         try:
@@ -36,10 +42,10 @@ class sensor:
             self._initialized = True
         except OSError as e:
             self._initialized = False
-            print("I2C error when initializing MPU6050:", e)
+            print(f"I2C error when initializing MPU6050{self._sensor_label()}:", e)
         except Exception as e:
             self._initialized = False
-            print("Unexpected error when initializing MPU6050:", e)
+            print(f"Unexpected error when initializing MPU6050{self._sensor_label()}:", e)
 
     # Read accelerometer and gyroscope data from the sensor
     def read_sensor_data(self):
@@ -73,11 +79,11 @@ class sensor:
             return accelerometer_data, gyroscope_data
 
         except OSError as e:
-            print("I2C read/write error:", e)
+            print(f"I2C read/write error{self._sensor_label()}:", e)
             self._initialized = False
             return None
         except Exception as e:
-            print("Unexpected error while reading sensor:", e)
+            print(f"Unexpected error while reading sensor{self._sensor_label()}:", e)
             return None
 
     def __del__(self):
