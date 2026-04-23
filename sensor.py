@@ -23,6 +23,8 @@ class sensor:
         self._owns_bus = bus is None
         self._initialized = False
         self.channel = channel
+        self._last_packet = None
+        self._same_packet_count = 0
         self._init_sensor()
 
     def _sensor_label(self):
@@ -57,6 +59,18 @@ class sensor:
         try:
             # Single burst read for accel, temp, gyro in one I2C transaction.
             data = self.bus.read_i2c_block_data(self.address, ACCEL_XOUT_H, 14)
+            packet = tuple(data)
+            if packet == self._last_packet:
+                self._same_packet_count += 1
+            else:
+                self._same_packet_count = 0
+                self._last_packet = packet
+
+            if self._same_packet_count >= 200:
+                print(f"Frozen sensor data detected, forcing reinit{self._sensor_label()}")
+                self._initialized = False
+                self._same_packet_count = 0
+                return None
 
             ax_raw = _to_int16(data[0], data[1])
             ay_raw = _to_int16(data[2], data[3])
@@ -81,6 +95,7 @@ class sensor:
         except OSError as e:
             print(f"I2C read/write error{self._sensor_label()}:", e)
             self._initialized = False
+            self._same_packet_count = 0
             return None
         except Exception as e:
             print(f"Unexpected error while reading sensor{self._sensor_label()}:", e)
