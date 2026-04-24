@@ -160,7 +160,7 @@ MUX_CHANNELS = [0, 3, 2]
 
 DT = 1 / 50
 BETA = 0.2
-CALIB_SAMPLES = 1000
+CALIB_SAMPLES = 100
 MAX_FILTER_DT = DT * 3
 
 # Yaw reset heuristic
@@ -380,9 +380,31 @@ try:
                     capture_file.flush()
 
             elapsed = time.monotonic() - frame_start
+
+            # -------- Performance test section --------
+            # if frame_counter % 50 == 0:   # every ~1 second at 50 Hz
+            #     frame_ms = elapsed * 1000.0
+
+            #     if elapsed > 0:
+            #         loop_hz = 1.0 / elapsed
+            #     else:
+            #         loop_hz = 0.0
+
+            #     lag = "YES" if elapsed > DT else "NO"
+
+            #     print(
+            #         f"[TEST] Frame {frame_counter} | "
+            #         f"time: {frame_ms:.2f} ms | "
+            #         f"rate: {loop_hz:.1f} Hz | "
+            #         f"target: {1/DT:.1f} Hz | "
+            #         f"missed deadline: {lag}"
+            #     )
+
             sleep_time = DT - elapsed
             if sleep_time > 0:
                 time.sleep(sleep_time)
+
+            
 
 except KeyboardInterrupt:
     print("Exiting...")
